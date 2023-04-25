@@ -160,4 +160,7 @@ rules:
     - update
     - watch
 {{- end }}
+{{- with .Values.rbac.extraRules }}
+{{- toYaml . | trim | nindent 2 }}
+{{- end }}
 {{- end -}}

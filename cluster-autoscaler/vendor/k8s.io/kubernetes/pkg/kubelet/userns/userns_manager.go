@@ -96,7 +96,7 @@ func (m *UsernsManager) writeMappingsToFile(pod types.UID, userNs userNamespace)
 
 	fstore, err := utilstore.NewFileStore(dir, &utilfs.DefaultFs{})
 	if err != nil {
-		return err
+		return fmt.Errorf("create user namespace store: %w", err)
 	}
 	if err := fstore.Write(mappingsFile, data); err != nil {
 		return err
@@ -123,7 +123,7 @@ func (m *UsernsManager) readMappingsFromFile(pod types.UID) ([]byte, error) {
 	dir := m.kl.GetPodDir(pod)
 	fstore, err := utilstore.NewFileStore(dir, &utilfs.DefaultFs{})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create user namespace store: %w", err)
 	}
 	return fstore.Read(mappingsFile)
 }
@@ -142,7 +142,7 @@ func MakeUserNsManager(kl userNsPodsManager) (*UsernsManager, error) {
 	}
 
 	// do not bother reading the list of pods if user namespaces are not enabled.
-	if !utilfeature.DefaultFeatureGate.Enabled(features.UserNamespacesStatelessPodsSupport) {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.UserNamespacesSupport) {
 		return &m, nil
 	}
 
@@ -151,13 +151,13 @@ func MakeUserNsManager(kl userNsPodsManager) (*UsernsManager, error) {
 		if os.IsNotExist(err) {
 			return &m, nil
 		}
-		return nil, fmt.Errorf("user namespace manager can't read pods from disk: %w", err)
+		return nil, fmt.Errorf("read pods from disk: %w", err)
 
 	}
 	for _, podUID := range found {
 		klog.V(5).InfoS("reading pod from disk for user namespace", "podUID", podUID)
 		if err := m.recordPodMappings(podUID); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("record pod mappings: %w", err)
 		}
 	}
 
@@ -258,7 +258,7 @@ func (m *UsernsManager) record(pod types.UID, from, length uint32) (err error) {
 
 // Release releases the user namespace allocated to the specified pod.
 func (m *UsernsManager) Release(podUID types.UID) {
-	if !utilfeature.DefaultFeatureGate.Enabled(features.UserNamespacesStatelessPodsSupport) {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.UserNamespacesSupport) {
 		return
 	}
 
@@ -266,6 +266,19 @@ func (m *UsernsManager) Release(podUID types.UID) {
 	defer m.lock.Unlock()
 
 	m.releaseWithLock(podUID)
+}
+
+// podAllocated returns true if the pod is allocated, false otherwise.
+func (m *UsernsManager) podAllocated(podUID types.UID) bool {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.UserNamespacesSupport) {
+		return false
+	}
+
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	_, ok := m.usedBy[podUID]
+	return ok
 }
 
 func (m *UsernsManager) releaseWithLock(pod types.UID) {
@@ -295,7 +308,7 @@ func (m *UsernsManager) releaseWithLock(pod types.UID) {
 
 func (m *UsernsManager) parseUserNsFileAndRecord(pod types.UID, content []byte) (userNs userNamespace, err error) {
 	if err = json.Unmarshal([]byte(content), &userNs); err != nil {
-		err = fmt.Errorf("can't parse file: %w", err)
+		err = fmt.Errorf("invalid user namespace mappings file: %w", err)
 		return
 	}
 
@@ -367,14 +380,14 @@ func (m *UsernsManager) createUserNs(pod *v1.Pod) (userNs userNamespace, err err
 
 // GetOrCreateUserNamespaceMappings returns the configuration for the sandbox user namespace
 func (m *UsernsManager) GetOrCreateUserNamespaceMappings(pod *v1.Pod) (*runtimeapi.UserNamespace, error) {
-	if !utilfeature.DefaultFeatureGate.Enabled(features.UserNamespacesStatelessPodsSupport) {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.UserNamespacesSupport) {
 		return nil, nil
 	}
 
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
-	if pod.Spec.HostUsers == nil || *pod.Spec.HostUsers == true {
+	if pod.Spec.HostUsers == nil || *pod.Spec.HostUsers {
 		return &runtimeapi.UserNamespace{
 			Mode: runtimeapi.NamespaceMode_NODE,
 		}, nil
@@ -427,7 +440,7 @@ func (m *UsernsManager) GetOrCreateUserNamespaceMappings(pod *v1.Pod) (*runtimea
 // allocations with the pods actually running. It frees any user namespace
 // allocation for orphaned pods.
 func (m *UsernsManager) CleanupOrphanedPodUsernsAllocations(pods []*v1.Pod, runningPods []*kubecontainer.Pod) error {
-	if !utilfeature.DefaultFeatureGate.Enabled(features.UserNamespacesStatelessPodsSupport) {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.UserNamespacesSupport) {
 		return nil
 	}
 
